@@ -68,6 +68,7 @@ class Experiment:
 
             self.optimizer = model.opt
             self.train_step = resnet_train_step
+            # starter code
 
     def run(self):
         self.train_step(self.model, self.optimizer, self.example_inputs)

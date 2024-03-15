@@ -26,7 +26,6 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 def sep(x: torch.Tensor) -> torch.Tensor:
     return x
-# starter code
 
 
 def sep_backward(grad: torch.Tensor) -> torch.Tensor:

@@ -15,4 +15,4 @@
    python install.py --continue_on_fail
    ```
    
-Code Documentation coming soong
+Code Documentation coming soon

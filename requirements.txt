@@ -5,4 +5,3 @@ torchvision==0.17.1
 torchaudio==2.2.1
 pandas==2.2.1
 polars==0.20.15
-numpy==1.23.5
