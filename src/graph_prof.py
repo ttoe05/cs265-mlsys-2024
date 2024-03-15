@@ -12,6 +12,7 @@ class OP(str, Enum):
     GET_ATTR = "get_attr"
     OUTPUT = "output"
     PLACEHOLDER = "placeholder"
+    # starter code
 
 
 # This is an example graph_profiler that extends the fx.Interpreter class, it

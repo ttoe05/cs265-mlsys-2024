@@ -23,6 +23,7 @@ class DummyModel(nn.Module):
 
     def forward(self, x):
         return self.mod(x)
+    # starter code
 
 
 # Anymodel that is used will be wrapped with this model. We do this to call a
