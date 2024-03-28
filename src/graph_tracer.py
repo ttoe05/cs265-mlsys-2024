@@ -250,6 +250,7 @@ def _compile(func: Callable, *args: Any, **kwargs: Any):
             tracing_mode=tracing_mode,
             decomposition_table=SPMD_DECOMP_TABLE,
             _allow_non_fake_inputs=False,
+            # _allow_non_fake_inputs=False,
         )(params, buffers, named_states, args, kwargs)
 
     params_and_buffers: Dict[str, Union[torch.Tensor, nn.Parameter]] = {
