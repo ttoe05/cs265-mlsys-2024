@@ -70,13 +70,13 @@ class GraphProfiler(fx.Interpreter):
         self.parameter_memory: list[int] = []
         self.intermediate_memory: list[int] = []
         self.gradient_memory: list[int] = []
-        self.node_memory_stat: Dict[torch.fx.Node, int] = {}
+        # self.node_memory_stat: Dict[torch.fx.Node, int] = {}
         self.swap: bool = True
 
-        self.activation_memory_total: int = 0
-        self.parameter_memory_total: int = 0
-        self.intermediate_memory_total: int = 0
-        self.gradient_memory_total: int = 0
+        # self.activation_memory_total: int = 0
+        # self.parameter_memory_total: int = 0
+        # self.intermediate_memory_total: int = 0
+        # self.gradient_memory_total: int = 0
         # graph logic for last use and first use
         self.graph_meta_data: Dict[str, Any] = {}
         self.env_cpu = {}
@@ -89,7 +89,7 @@ class GraphProfiler(fx.Interpreter):
         # Printing the input nodes, node users and node names.
         logging.info(f"Graph initialized listing out the nodes:")
         # create the mapping for last use in the forward pass
-        self.node_pass_usage : dict[str, dict] = {}
+        self.node_pass_usage : dict[fx.Node, dict] = {}
         # create a counter for the id of the nodes in both forward and backwards pass
         self.last_forward_pass_id : list[int] = []
         self.first_backward_pass_id : list[int] = []
@@ -107,7 +107,6 @@ class GraphProfiler(fx.Interpreter):
 
             # create the forward pass last use dict
             if self.forward_pass_build:
-                logging.info(f"In the forward pass of building usage mapping")
 
                 # check if the node inupts are empty
                 if len(node.all_input_nodes) == 0:
@@ -132,7 +131,6 @@ class GraphProfiler(fx.Interpreter):
                         else:
                             self.node_pass_usage[input_node]['last_forward_use_node'] = node
             else:
-                logging.info(f"In the backward pass of building usage mapping")
                 # check if the node is in the pass dictionary
                 for input_node in node.all_input_nodes:
                     if input_node not in self.node_pass_usage.keys():
@@ -150,18 +148,22 @@ class GraphProfiler(fx.Interpreter):
                         else:
                             # update only the last backward use node
                             self.node_pass_usage[input_node]['last_backward_use_node'] = node
-            # # categorize the node
-            # try:
-            #     self.node_pass_usage[node]['category'] = self._categorize_node(node=node)
-            # except KeyError:
-            #     logging.info(f"{node} is not in the pass_usage mapping, inserting")
-            #     self.node_pass_usage[node] = {}
-            #     self.node_pass_usage[node]['category'] = self._categorize_node(node=node)
-            # counter_id += 1
-        logging.info(f"Node passage usuage dict: {self.node_pass_usage}")
+            # categorize the node
+            if node.target == torch.ops.aten._fused_adam.default:
+                param_adam_args = node.args[0]
+                grad_adam_args = node.args[1]
+                # iterate over the param nodes and categorize them in the graph metadata
+                for param in param_adam_args:
+                    self.graph_meta_data[param.name] = 'parameter'
+                for grad in grad_adam_args:
+                    self.graph_meta_data[grad.name] = 'gradient'
+            else:
+                self.graph_meta_data[node.name] = self._categorize_node(node=node)
+        logging.info(f"Graph metadata dict: {self.graph_meta_data}")
         # create a list of the nodes that are last used
         self.last_forward_pass_id = [self.node_pass_usage[x]['last_forward_use_node'] for x in self.node_pass_usage.keys()]
         self.first_backward_pass_id = [self.node_pass_usage[x]['first_backward_use_node'] for x in self.node_pass_usage.keys()]
+        self.last_backward_pass_id = [self.node_pass_usage[x]['last_backward_use_node'] for x in self.node_pass_usage.keys()]
 
     def _categorize_node(self, node: fx.Node) -> str:
         """
@@ -180,7 +182,7 @@ class GraphProfiler(fx.Interpreter):
                 return 'gradient'
         return 'intermediate'
 
-    def _get_memory_usage(self, node: fx.Node,
+    def _get_memory_usage(self,
                           node_tensor: torch.Tensor) -> int:
         """
         Function gets the memory usage of a feature map, activation, paramter, or gradient node
@@ -188,54 +190,87 @@ class GraphProfiler(fx.Interpreter):
         # get the current usage in gpu memory
         try:
             torch_bytes = torch.numel(node_tensor) * torch.element_size(node_tensor)
-            self.node_memory_stat[node] = torch_bytes
-
-            return torch_bytes
+            # self.node_memory_stat[node] = torch_bytes
         except Exception as e:
             try:
                 torch_bytes = torch.Tensor.nelement(node_tensor) * torch.Tensor.element_size(node_tensor)
-                self.node_memory_stat[node] = torch_bytes
+                # self.node_memory_stat[node] = torch_bytes
             except Exception as e:
-                logging.warning(f"node: {node} may not be a tensor type of object {type(self.env[node])}: {e} ")
-                pass
-            return 0
+                # logging.warning(f"node: {node} may not be a tensor type of object {type(self.env[node])}: {e} ")
+                torch_bytes = 0
+            return torch_bytes
 
-    def update_total_memory(self, node: fx, add_flag: bool) -> None:
+    # def update_total_memory(self, node: fx, add_flag: bool) -> None:
+    #     """
+    #     function updates the total memory of the category memory total
+    #     """
+    #     # get the category
+    #     node_category = self.graph_meta_data[node.name]
+    #     # get the memory usage
+    #     try:
+    #         mem_usage = self.node_memory_stat[node]
+    #     except KeyError:
+    #         logging.warning(f"node: {node.name} may not be a tensor type of object")
+    #         return None
+    #     # check if it is currently the forward pass
+    #     if add_flag:
+    #         match node_category:
+    #             case 'activation_feature':
+    #                 self.activation_memory_total += mem_usage
+    #                 logging.info(f"activation_feature adding memusage for node {node.name}: {mem_usage} total {self.activation_memory_total}")
+    #             case 'gradient':
+    #                 self.gradient_memory_total += mem_usage
+    #             case 'intermediate':
+    #                 self.intermediate_memory_total += mem_usage
+    #             case 'parameter':
+    #                 self.parameter_memory_total += mem_usage
+    #     else:
+    #         match node_category:
+    #             case 'activation_feature':
+    #                 self.activation_memory_total -= mem_usage
+    #                 logging.info(
+    #                     f"activation_feature subtracting memusage for node {node.name}: {mem_usage} total {self.activation_memory_total}")
+    #             case 'gradient':
+    #                 self.gradient_memory_total -= mem_usage
+    #             case 'intermediate':
+    #                 self.intermediate_memory_total -= mem_usage
+    #             case 'parameter':
+    #                 self.parameter_memory_total -= mem_usage
+
+    def update_memory_usage(self) -> None:
         """
-        function updates the total memory of the category memory total
+        Function iterates over the env parameter to collect the memory usage of each feature, paramter, or gradient node
         """
-        # get the category
-        node_category = self._categorize_node(node=node)
-        # get the memory usage
-        try:
-            mem_usage = self.node_memory_stat[node]
-        except KeyError:
-            logging.warning(f"node: {node.name} may not be a tensor type of object")
-            return None
-        # check if it is currently the forward pass
-        if add_flag:
-            match node_category:
-                case 'activation_feature':
-                    self.activation_memory_total += mem_usage
-                    logging.info(f"activation_feature adding memusage for node {node.name}: {mem_usage} total {self.activation_memory_total}")
-                case 'gradient':
-                    self.gradient_memory_total += mem_usage
-                case 'intermediate':
-                    self.intermediate_memory_total += mem_usage
-                case 'parameter':
-                    self.parameter_memory_total += mem_usage
-        else:
-            match node_category:
-                case 'activation_feature':
-                    self.activation_memory_total -= mem_usage
-                    logging.info(
-                        f"activation_feature subtracting memusage for node {node.name}: {mem_usage} total {self.activation_memory_total}")
-                case 'gradient':
-                    self.gradient_memory_total -= mem_usage
-                case 'intermediate':
-                    self.intermediate_memory_total -= mem_usage
-                case 'parameter':
-                    self.parameter_memory_total -= mem_usage
+        # set the totals
+        parameter_memory_total = 0
+        activation_memory_total = 0
+        gradient_memory_total = 0
+        intermediate_memory_total = 0
+        # iterate over the keys
+        for node_env in self.env.keys():
+            # get the category of the node
+            category = self.graph_meta_data[node_env.name]
+            # check if the value is a torch tensor
+            if torch.is_tensor(self.env[node_env]):
+                # get the memory usage
+                mem_usage = self._get_memory_usage(node_tensor=self.env[node_env])
+
+                # add the mem_usage to the total
+                match category:
+                    case 'activation_feature':
+                        activation_memory_total += mem_usage
+                    case 'gradient':
+                        gradient_memory_total += mem_usage
+                    case 'intermediate':
+                        intermediate_memory_total += mem_usage
+                    case 'parameter':
+                        parameter_memory_total += mem_usage
+
+
+        self.parameter_memory.append(parameter_memory_total)
+        self.activation_memory.append(activation_memory_total)
+        self.gradient_memory.append(gradient_memory_total)
+        self.intermediate_memory.append(intermediate_memory_total)
 
     def analysis_dump(self) -> None:
         """
@@ -243,10 +278,10 @@ class GraphProfiler(fx.Interpreter):
         """
         # create the analysis dict
         analysis_dict = {
-            'activation_memory_total': self.activation_memory_total,
-            'gradient_memory_total': self.gradient_memory_total,
-            'intermediate_memory_total': self.intermediate_memory_total,
-            'parameter_memory_total': self.parameter_memory_total,
+            # 'activation_memory_total': self.activation_memory_total,
+            # 'gradient_memory_total': self.gradient_memory_total,
+            # 'intermediate_memory_total': self.intermediate_memory_total,
+            # 'parameter_memory_total': self.parameter_memory_total,
             'total_runtime_sec': self.total_runtime_sec,
             'gpu_total_memory': self.gpu_total_memory,
             'activation_memory': self.activation_memory,
@@ -325,9 +360,7 @@ class GraphProfiler(fx.Interpreter):
                             self.env_cpu[input_node] = self.env[input_node].to('cpu')
                             # remove the env tensor from memory
                             self.env[input_node] = None
-                            self.update_total_memory(node=input_node, add_flag=False)
-                    # logging.info(f"ENV: {self.env}")
-                    # logging.info(f"ENV_CPU: {self.env_cpu}")
+
         else:
             # check if the node is the first use in the backwards pass
             if node in self.first_backward_pass_id:
@@ -335,7 +368,7 @@ class GraphProfiler(fx.Interpreter):
                 # iterate through the input nodes
                 for input_node in node.all_input_nodes:
                     # check if the forward pass last node equals the current node
-                    if self._categorize_node(input_node) == 'activation_feature':
+                    if self.graph_meta_data[input_node.name] == 'activation_feature':
                         try:
                             if node == self.node_pass_usage[input_node]['first_backward_use_node'] and torch.is_tensor(self.env_cpu[input_node]):
                                 logging.info(f"Node: {node.name}: swapping {input_node.name} back to GPU")
@@ -343,16 +376,8 @@ class GraphProfiler(fx.Interpreter):
                                 self.env[input_node] = self.env_cpu[input_node].to(self.gpu_env)
                                 # remove the env tensor from memory
                                 self.env_cpu[input_node] = None
-                                self.update_total_memory(node=input_node, add_flag=True)
-                            # check if it is the last use in the backward pass update memory before garbage collection
-                            elif node == self.node_pass_usage[input_node]['last_backward_use_node'] and torch.is_tensor(self.env_cpu[input_node]):
-                                # update the total mem usage of the category
-                                self.update_total_memory(node=input_node, add_flag=False)
                         except Exception as e:
                             logging.error(f"wasn't moved to cpu {input_node}: {e}")
-            # logging.info(f"ENV: {self.env}")
-            # if node.name == 'linear_backward':
-            #     logging.info(f"ENV_CPU: {input_node} -> {self.env_cpu[input_node]}")
 
     def run_node(self, n: fx.Node) -> Any:
 
@@ -374,6 +399,8 @@ class GraphProfiler(fx.Interpreter):
         result = super().run_node(n)
         t_end = time.time()
 
+        # set the
+        self.env[n] = result
         if n not in self.runtimes_sec.keys():
             # create a key with the empty list of times
             self.runtimes_sec[n] = []
@@ -385,23 +412,6 @@ class GraphProfiler(fx.Interpreter):
 
         # check if the node result is a tensor
         # print(f"Result type: {type(result)}")
-        if torch.is_tensor(result):
-            logging.info(f"Node {n} reult:{type(result)} passing to the get mem usuage")
-            self._get_memory_usage(node=n, node_tensor=result)
-            # get the memory of result of gpu
-            gpu_memory_usage = torch.mps.current_allocated_memory()
-            self.gpu_total_memory.append(gpu_memory_usage)
-            # get the category stats
-            # self.update_total_memory(node=n, add_flag=True)
-            if self.forward_pass:
-                self.update_total_memory(node=n, add_flag=True)
-            else:
-                # check if backwards is in the name
-                if 'backward' in n.name:
-                    # parse out the backward str
-
-                #check if the node was in the forward pass
-                self.update_total_memory(node=n, add_flag=False)
             # logging.info(f"node stats: {self.node_memory_stat}")
 
 
@@ -414,12 +424,19 @@ class GraphProfiler(fx.Interpreter):
             # swap any tensors needed as inputs back to gpu
             if self.swap:
                 self.swap_memory(node=n, to_cpu=True)
+        else:
+            if n in self.last_backward_pass_id:
+                # check if the input nodes are the last use in the backwards pass
+                for input_node in n.all_input_nodes:
+                    if self.node_pass_usage[input_node]['last_backward_use_node'] == n:
+                        # remove from the env
+                        self.env[input_node] = None
 
-        # add the total mem used for the categories
-        self.parameter_memory.append(self.parameter_memory_total)
-        self.activation_memory.append(self.activation_memory_total)
-        self.gradient_memory.append(self.gradient_memory_total)
-        self.intermediate_memory.append(self.intermediate_memory_total)
+        # get the total memory of the categories
+        self.update_memory_usage()
+        # get the memory of result of gpu
+        gpu_memory_usage = torch.mps.current_allocated_memory()
+        self.gpu_total_memory.append(gpu_memory_usage)
 
         return result
 

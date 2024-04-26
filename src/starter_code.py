@@ -71,7 +71,7 @@ def train_step(
 
 
 def graph_transformation(gm: fx.GraphModule, args: Any) -> fx.GraphModule:
-    logging.info(gm.graph)
+    # logging.info(gm.graph)
     # print(f"Graph Tabular: {gm.graph.print_tabular()}")
 
     graph_profiler = GraphProfiler(gm)
