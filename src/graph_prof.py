@@ -154,11 +154,11 @@ class GraphProfiler(fx.Interpreter):
                 grad_adam_args = node.args[1]
                 # iterate over the param nodes and categorize them in the graph metadata
                 for param in param_adam_args:
-                    self.graph_meta_data[param.name] = 'parameter'
+                    self.graph_meta_data[param.name]['category'] = 'parameter'
                 for grad in grad_adam_args:
-                    self.graph_meta_data[grad.name] = 'gradient'
+                    self.graph_meta_data[grad.name]['category'] = 'gradient'
             else:
-                self.graph_meta_data[node.name] = self._categorize_node(node=node)
+                self.graph_meta_data[node.name]['category'] = self._categorize_node(node=node)
         logging.info(f"Graph metadata dict: {self.graph_meta_data}")
         # create a list of the nodes that are last used
         self.last_forward_pass_id = [self.node_pass_usage[x]['last_forward_use_node'] for x in self.node_pass_usage.keys()]
@@ -198,7 +198,7 @@ class GraphProfiler(fx.Interpreter):
             except Exception as e:
                 # logging.warning(f"node: {node} may not be a tensor type of object {type(self.env[node])}: {e} ")
                 torch_bytes = 0
-            return torch_bytes
+        return torch_bytes
 
     # def update_total_memory(self, node: fx, add_flag: bool) -> None:
     #     """
@@ -249,7 +249,7 @@ class GraphProfiler(fx.Interpreter):
         # iterate over the keys
         for node_env in self.env.keys():
             # get the category of the node
-            category = self.graph_meta_data[node_env.name]
+            category = self.graph_meta_data[node_env.name]['category']
             # check if the value is a torch tensor
             if torch.is_tensor(self.env[node_env]):
                 # get the memory usage
@@ -352,14 +352,22 @@ class GraphProfiler(fx.Interpreter):
                 # logging.info(f"Node: {node.name} has inputs to swap to cpu...")
                 # iterate through the input nodes
                 for input_node in node.all_input_nodes:
-                    if self._categorize_node(input_node) == 'activation_feature':
+                    if (
+                        self.graph_meta_data[input_node.name]['category'] == 'activation_feature'
+                        or self.graph_meta_data[input_node.name]['category'] == 'intermediate'
+                    ):
                         # check if the forward pass last node equals the current node
                         if node == self.node_pass_usage[input_node]['last_forward_use_node'] and torch.is_tensor(self.env[input_node]):
                             logging.info(f"Node: {node.name}: swapping {input_node.name} to CPU")
+                            # record the swap time
+                            swap_start_time = time.time()
                             # add the key and the cpu tensor in env_cpu
                             self.env_cpu[input_node] = self.env[input_node].to('cpu')
                             # remove the env tensor from memory
                             self.env[input_node] = None
+                            swap_time = time.time() - swap_start_time
+                            # update the graph_metadata
+                            self.graph_meta_data[input_node.name]['forward_swap_time'] = swap_time
 
         else:
             # check if the node is the first use in the backwards pass
@@ -368,14 +376,22 @@ class GraphProfiler(fx.Interpreter):
                 # iterate through the input nodes
                 for input_node in node.all_input_nodes:
                     # check if the forward pass last node equals the current node
-                    if self.graph_meta_data[input_node.name] == 'activation_feature':
+                    if (
+                        self.graph_meta_data[input_node.name]['category'] == 'activation_feature'
+                        or self.graph_meta_data[input_node.name]['category'] == 'intermediate'
+                    ):
                         try:
                             if node == self.node_pass_usage[input_node]['first_backward_use_node'] and torch.is_tensor(self.env_cpu[input_node]):
                                 logging.info(f"Node: {node.name}: swapping {input_node.name} back to GPU")
+                                # compute the swap time
+                                swap_start_time = time.time()
                                 # bring the tensor back to GPU in the env environment
                                 self.env[input_node] = self.env_cpu[input_node].to(self.gpu_env)
                                 # remove the env tensor from memory
                                 self.env_cpu[input_node] = None
+                                swap_time = time.time() - swap_start_time
+                                # update the graph_metadata
+                                self.graph_meta_data[input_node.name]['backward_swap_time'] = swap_time
                         except Exception as e:
                             logging.error(f"wasn't moved to cpu {input_node}: {e}")
 
