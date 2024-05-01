@@ -64,7 +64,7 @@ class GraphProfiler(fx.Interpreter):
         # backward pass.
         # static data analysis
         self.total_runtime_sec: list[float] = []
-        self.runtimes_sec: Dict[torch.fx.Node, list[float]] = {}
+        # self.runtimes_sec: Dict[torch.fx.Node, list[float]] = {}
         self.gpu_total_memory: list[int] = []
         self.activation_memory: list[int] = []
         self.parameter_memory: list[int] = []
@@ -93,7 +93,7 @@ class GraphProfiler(fx.Interpreter):
         # create a counter for the id of the nodes in both forward and backwards pass
         self.last_forward_pass_id : list[int] = []
         self.first_backward_pass_id : list[int] = []
-        # counter_id = 0
+        rank_id = 0
         for node in self.module.graph.nodes:
             # logging.info(f"Node name: {node.name}")
             # logging.info(f"Node type: {node.op}")
@@ -101,13 +101,16 @@ class GraphProfiler(fx.Interpreter):
             # logging.info(f"Input to this node: {[x.name for x in node.all_input_nodes]}")
             # logging.info(f"Users of this node: {node.users}")
             # logging.info("\n")
+            # initialize the key in the graph meta_data_dict
+            self.graph_meta_data[node.name] = {}
             if node.name == 'sep':
                 logging.info(f"Forward pass Ended at node {node.name} while building usage mapping")
                 self.forward_pass_build = False
 
             # create the forward pass last use dict
             if self.forward_pass_build:
-
+                # set the forward pass attribute to the node
+                self.graph_meta_data[node.name]['forward_pass'] = True
                 # check if the node inupts are empty
                 if len(node.all_input_nodes) == 0:
                     # add the node to the forward pass dict with None last use node strind
@@ -131,6 +134,8 @@ class GraphProfiler(fx.Interpreter):
                         else:
                             self.node_pass_usage[input_node]['last_forward_use_node'] = node
             else:
+                # set the forward pass attribute to the node
+                self.graph_meta_data[node.name]['forward_pass'] = False
                 # check if the node is in the pass dictionary
                 for input_node in node.all_input_nodes:
                     if input_node not in self.node_pass_usage.keys():
@@ -159,7 +164,11 @@ class GraphProfiler(fx.Interpreter):
                     self.graph_meta_data[grad.name]['category'] = 'gradient'
             else:
                 self.graph_meta_data[node.name]['category'] = self._categorize_node(node=node)
-        logging.info(f"Graph metadata dict: {self.graph_meta_data}")
+
+            # add the rank for the node
+            self.graph_meta_data[node.name]['rank'] = rank_id
+            rank_id += 1
+        # logging.info(f"Graph metadata dict: {self.graph_meta_data}")
         # create a list of the nodes that are last used
         self.last_forward_pass_id = [self.node_pass_usage[x]['last_forward_use_node'] for x in self.node_pass_usage.keys()]
         self.first_backward_pass_id = [self.node_pass_usage[x]['first_backward_use_node'] for x in self.node_pass_usage.keys()]
@@ -200,42 +209,6 @@ class GraphProfiler(fx.Interpreter):
                 torch_bytes = 0
         return torch_bytes
 
-    # def update_total_memory(self, node: fx, add_flag: bool) -> None:
-    #     """
-    #     function updates the total memory of the category memory total
-    #     """
-    #     # get the category
-    #     node_category = self.graph_meta_data[node.name]
-    #     # get the memory usage
-    #     try:
-    #         mem_usage = self.node_memory_stat[node]
-    #     except KeyError:
-    #         logging.warning(f"node: {node.name} may not be a tensor type of object")
-    #         return None
-    #     # check if it is currently the forward pass
-    #     if add_flag:
-    #         match node_category:
-    #             case 'activation_feature':
-    #                 self.activation_memory_total += mem_usage
-    #                 logging.info(f"activation_feature adding memusage for node {node.name}: {mem_usage} total {self.activation_memory_total}")
-    #             case 'gradient':
-    #                 self.gradient_memory_total += mem_usage
-    #             case 'intermediate':
-    #                 self.intermediate_memory_total += mem_usage
-    #             case 'parameter':
-    #                 self.parameter_memory_total += mem_usage
-    #     else:
-    #         match node_category:
-    #             case 'activation_feature':
-    #                 self.activation_memory_total -= mem_usage
-    #                 logging.info(
-    #                     f"activation_feature subtracting memusage for node {node.name}: {mem_usage} total {self.activation_memory_total}")
-    #             case 'gradient':
-    #                 self.gradient_memory_total -= mem_usage
-    #             case 'intermediate':
-    #                 self.intermediate_memory_total -= mem_usage
-    #             case 'parameter':
-    #                 self.parameter_memory_total -= mem_usage
 
     def update_memory_usage(self) -> None:
         """
@@ -254,6 +227,15 @@ class GraphProfiler(fx.Interpreter):
             if torch.is_tensor(self.env[node_env]):
                 # get the memory usage
                 mem_usage = self._get_memory_usage(node_tensor=self.env[node_env])
+                # update the node info
+                self.graph_meta_data[node_env.name]['active_memory'] = mem_usage
+                try:
+                    peak_mem = self.graph_meta_data[node_env.name]['peak_memory']
+                    if peak_mem < mem_usage:
+                        self.graph_meta_data[node_env.name]['peak_memory'] = mem_usage
+                except Exception as e:
+                    # set the peak memory to the current memeory
+                    self.graph_meta_data[node_env.name]['peak_memory'] = mem_usage
 
                 # add the mem_usage to the total
                 match category:
@@ -271,6 +253,7 @@ class GraphProfiler(fx.Interpreter):
         self.activation_memory.append(activation_memory_total)
         self.gradient_memory.append(gradient_memory_total)
         self.intermediate_memory.append(intermediate_memory_total)
+
 
     def analysis_dump(self) -> None:
         """
@@ -301,6 +284,22 @@ class GraphProfiler(fx.Interpreter):
         outfile.close()
 
 
+    def graph_stats_dump(self) -> None:
+        """
+        Dump the graph statistics captured in the run for all of the totals
+        """
+
+        # create the path if it does not exist
+        Path("analysis").mkdir(parents=True, exist_ok=True)
+        # dump the analysis to the file path
+        json_analysis = json.dumps(self.graph_meta_data, indent=4)
+        with open("analysis/graph_stats.json", "w") as outfile:
+            outfile.write(json_analysis)
+
+        logging.info(f"data written to json dumps")
+        outfile.close()
+
+
     def run(
         self,
         *args,
@@ -315,6 +314,7 @@ class GraphProfiler(fx.Interpreter):
         self.total_runtime_sec.append(t_end - t_start)
         # dump the analysis
         self.analysis_dump()
+        self.graph_stats_dump()
         return return_val
 
     def GPU_checker(self, node: fx.Node):
@@ -368,6 +368,8 @@ class GraphProfiler(fx.Interpreter):
                             swap_time = time.time() - swap_start_time
                             # update the graph_metadata
                             self.graph_meta_data[input_node.name]['forward_swap_time'] = swap_time
+                            # set the timer for the node to get the inactive time
+                            self.graph_meta_data[input_node.name]['inactive_start_time'] = time.time()
 
         else:
             # check if the node is the first use in the backwards pass
@@ -392,6 +394,9 @@ class GraphProfiler(fx.Interpreter):
                                 swap_time = time.time() - swap_start_time
                                 # update the graph_metadata
                                 self.graph_meta_data[input_node.name]['backward_swap_time'] = swap_time
+                                # get the inactive time
+                                self.graph_meta_data[input_node.name]['inactive_end_time'] = time.time()
+                                self.graph_meta_data[input_node.name]['inactive_time'] = self.graph_meta_data[input_node.name]['inactive_end_time'] - self.graph_meta_data[input_node.name]['inactive_start_time']
                         except Exception as e:
                             logging.error(f"wasn't moved to cpu {input_node}: {e}")
 
@@ -417,10 +422,10 @@ class GraphProfiler(fx.Interpreter):
 
         # set the
         self.env[n] = result
-        if n not in self.runtimes_sec.keys():
-            # create a key with the empty list of times
-            self.runtimes_sec[n] = []
-        self.runtimes_sec[n].append(t_end - t_start)
+        try:
+            self.graph_meta_data[n.name]['run_time'].append(t_end - t_start)
+        except Exception as e:
+            self.graph_meta_data[n.name]['run_time'] = [t_end - t_start,]
         # get the environment keys after each run
         # logging.info(f"Listing the environment variable keys in environment: {self.env.keys()}")
         # you can end measuring the run-time of a node here
