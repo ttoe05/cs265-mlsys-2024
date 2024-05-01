@@ -1,17 +1,15 @@
-from functools import wraps
-import os
 import logging
+import os
+from functools import wraps
 from typing import Any
-import torch.multiprocessing as mp
+
 import torch
-import torch.nn as nn
-from graph_tracer import compile, SEPFunction
-from graph_prof import GraphProfiler
-from util import init_logger
-from typing import Callable
-from benchmarks import Experiment, model_names, model_batch_sizes
-from torch._subclasses.fake_tensor import FakeTensorMode
 import torch.fx as fx
+import torch.multiprocessing as mp
+import torch.nn as nn
+
+from solutions_file import GraphProfiler
+from graph_tracer import SEPFunction, compile
 
 # This is the dummy model that is for use in starter code. But we will
 # experiment with Resnet and Bert models from Torch Benchmark suite.
@@ -27,7 +25,6 @@ class DummyModel(nn.Module):
 
     def forward(self, x):
         return self.mod(x)
-    # starter code
 
 
 # Anymodel that is used will be wrapped with this model. We do this to call a
@@ -49,7 +46,7 @@ class WrappedDummyModel(nn.Module):
 # This is the train_step function that takes in a model, optimizer and an input
 # mini batch and calls the forward pass, loss function and the optimizer step. A
 # computational graph corresponding to a train_step will be captured by the
-# compiler. 
+# compiler.
 
 
 def train_step(
@@ -71,14 +68,16 @@ def train_step(
 
 
 def graph_transformation(gm: fx.GraphModule, args: Any) -> fx.GraphModule:
-    # logging.info(gm.graph)
-    # print(f"Graph Tabular: {gm.graph.print_tabular()}")
-
     graph_profiler = GraphProfiler(gm)
+    warm_up_iters, profile_iters = 2, 3
     with torch.no_grad():
-        graph_profiler.run(*args)
-        # add the
-
+        for _ in range(warm_up_iters):
+            graph_profiler.run(*args)
+        graph_profiler.reset_stats()
+        for _ in range(profile_iters):
+            graph_profiler.run(*args)
+    graph_profiler.aggregate_stats()
+    graph_profiler.print_stats()
     return gm
 
 
@@ -103,55 +102,30 @@ def graph_transformation(gm: fx.GraphModule, args: Any) -> fx.GraphModule:
 #     return inner
 
 
-def experiment(model_name: str=None):
-    # logging.getLogger().setLevel(logging.DEBUG)
+def experiment():
+    logging.getLogger().setLevel(logging.DEBUG)
+    torch.manual_seed(20)
     mps_device = torch.device("mps")
-    if model_name is None:
-        # run the dummy model code
-        torch.manual_seed(20)
-        batch_size = 100
-        layers = 10
-        dim = 100
-        num_iters = 5
-        dummy_model = DummyModel(dim=dim, layers=layers)
-        model = WrappedDummyModel(dummy_model).to(mps_device)
-        batch = torch.randn(batch_size, dim).to(mps_device)
-        # model = WrappedDummyModel(dummy_model).cuda()
-        # batch = torch.randn(batch_size, dim).cuda()
-        optim = torch.optim.Adam(
-            model.parameters(), lr=0.01, foreach=False, fused=True, capturable=True
-        )
+    batch_size = 1000
+    layers = 10
+    dim = 100
+    num_iters = 5
+    dummy_model = DummyModel(dim=dim, layers=layers)
+    model = WrappedDummyModel(dummy_model).to(mps_device)
+    batch = torch.randn(batch_size, dim).to(mps_device)
+    optim = torch.optim.Adam(
+        model.parameters(), lr=0.01, foreach=False, fused=True, capturable=True
+    )
 
-        compiled_fn = compile(train_step, graph_transformation)
-        compiled_fn(model, optim, batch)
-        return compiled_fn
+    for param in model.parameters():
+        if param.requires_grad:
+            param.grad = torch.rand_like(param)
+    optim.step()
+    optim.zero_grad()
 
-    else:
-        # check if the model name is in the list for training
-        if model_name not in model_names:
-            raise ValueError(f"Need to select a model from {model_names} or pass None to use the dummy model")
-        # get the batch size based on the name
-        batch_size = model_batch_sizes[model_name]
-        logging.info(f"Running profiler on the model {model_name} with batch size: {batch_size}")
-        # initialize the experiment from benchmarks
-        # exp = Experiment(model_name=model_name, batch_size=batch_size)
-        # model_wrapped = WrappedDummyModel(exp.model).to(mps_device)
-
-        # create the fake_tensor
-        exp = Experiment(model_names[1], model_batch_sizes[model_names[1]])
-        # exp.run()
-        compiled_fn = compile(exp.train_step, graph_transformation)
-        compiled_fn(exp.model, exp.optimizer, exp.example_inputs)
-        print(f"compile function type: {type(compiled_fn)}")
-
-# def plot_gpu_memory
-
+    compiled_fn = compile(train_step, graph_transformation)
+    compiled_fn(model, optim, batch)
 
 
 if __name__ == "__main__":
-    init_logger(file_name='graph_profiler.log')
-    model_name = model_names[1]
-    experiment(model_name=model_name)
-
-
-
+    experiment()

@@ -1,6 +1,7 @@
 import logging
 import torch
 import time
+from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 import torch.fx as fx
 
 # questions
@@ -12,7 +13,9 @@ class Scheduler:
     The scheduler class of the mu-Two algorithim
     """
     def __init__(self,
-                 statistical_stats: dict[str, dict]):
+                 gm: torch.fx.GraphModule,
+                 statistical_stats: dict[str, dict],
+                 node_pass_usage: dict[fx.Node, dict]):
         """
         Initializing the scheduler with the following parameter attributes
         :param candidates: list
@@ -21,10 +24,14 @@ class Scheduler:
         :param statistical_stats: dict
             A dictionary of the run_time and memory statistics for the nodes in the graphprofiler.
         """
+        self.graph_module = gm
+        self.graph_module = self.remove_detach_nodes(gm=self.graph_module)
         self.statistical_stats = statistical_stats
         self.candidates, self.ranks = self._get_candidates(stats=statistical_stats)
+        self.node_pass_usage = node_pass_usage
         self.recomps = []
-        self.candidates_dict[fx.Node, dict] = {}
+        self.candidates_dict[str, dict] = {}
+        self.node_name_mapping = self.get_name_to_node_map()
         self.rank_mapping[int, str] = {statistical_stats[k]: k for k in statistical_stats.keys()}
 
     def _get_candidates(self, stats: dict[str, dict]) -> tuple[list, list]:
@@ -90,52 +97,47 @@ class Scheduler:
                 recompute_ratio = compare_ratio
         return candidate
 
-    def _update_recomps(self, recomps: list, candidate: tuple):
+    def _update_recomps(self, candidate: any):
         """
-        :param recomps: list
-            The list of intermediate nodes for recomputation
         :param candidate: tuple
         """
-        pass
+        recomp_cnt = 1
+        for rp in self.recomps:
+            if candidate in self.candidates_dict[rp]['recomp_src']:
+                recomp_cnt += 1
+                self.candidates_dict[rp]['recomp_src'].remove(candidate)
+                self.candidates_dict[rp]['recomp_src'].extend(self.candidates_dict[candidate]['recomp_src'])
+                self.candidates_dict[rp]['recomp_time'] += self._get_recomp_time(recomp_src=self.candidates_dict[candidate]['recomp_src'])
 
-    def _update_candidates(self, t, recomp_cnt, candidates):
+        return recomp_cnt
+
+    def _update_candidates(self, candidate: str, recomp_cnt: int):
         """
         :param t:
         :param recomp_cnt:
         :param candidates:
         """
-        for candidiate in candidates:
-            if t in self.candidates_dict[candidiate]['recomp_src']:
-                self.candidates_dict[candidiate]['recomp_src'].remove(t)
-                self.candidates_dict[candidiate]['recomp_src'].extend(self.candidates_dict[t]['recomp_src'])
-                self.candidates_dict[candidiate]['recomp_time'] += self._get_recomp_time(recomp_src=self.candidates_dict[t]['recomp_src'])
-                for rp in recomps:
-                    if candidiate in self.candidates_dict[rp]['recomp_src']:
-                        self.candidates_dict[candidiate]['recomp_total_time'] += self.candidates_dict[candidiate]['recomp_time']
-            if candidiate in self.candidates_dict[t]['recomp_src']:
-                self.candidates_dict[candidiate]['recomp_total_time'] = recomp_cnt * self.candidates_dict[candidiate]['recomp_time']
-            self.update_recompute_ratio(candidates=candidates)
+        for cand in self.candidates:
+            if candidate in self.candidates_dict[cand]['recomp_src']:
+                self.candidates_dict[cand]['recomp_src'].remove(candidate)
+                self.candidates_dict[cand]['recomp_src'].extend(self.candidates_dict[candidate]['recomp_src'])
+                self.candidates_dict[cand]['recomp_time'] += self._get_recomp_time(recomp_src=self.candidates_dict[candidate]['recomp_src'])
+                for rp in self.recomps:
+                    if cand in self.candidates_dict[rp]['recomp_src']:
+                        self.candidates_dict[cand]['recomp_total_time'] += self.candidates_dict[cand]['recomp_time']
+            if cand in self.candidates_dict[candidate]['recomp_src']:
+                self.candidates_dict[cand]['recomp_total_time'] = recomp_cnt * self.candidates_dict[cand]['recomp_time']
+            self.update_recompute_ratio(candidates=cand)
 
-    def compute_memory(self, node_tensor: torch.Tensor):
+    def get_memory(self, candidate: str):
         """
-        :param node_tensor: torch.Tensor
+        :param candidate: str
         """
-        # get the current usage in gpu memory
-        try:
-            torch_bytes = torch.numel(node_tensor) * torch.element_size(node_tensor)
-        except Exception as e:
-            try:
-                torch_bytes = torch.Tensor.nelement(node_tensor) * torch.Tensor.element_size(node_tensor)
-            except Exception as e:
-                logging.error(f"Error in computing memory for the tensor: {e}")
-                torch_bytes = 0
-        return torch_bytes
+        return self.statistical_stats[candidate]['peak_memory']
 
     def recomputation_policy(self,
                              mem_limit: int,
-                             max_peak_memory: int,
-                             initialization: tuple,
-                             recomps: list):
+                             max_peak_memory: int) -> None:
         """
         :param candidate_set: tuple
         :param mem_limit:
@@ -152,77 +154,216 @@ class Scheduler:
             self.candidates.remove(candidate)
             recomp_cnt = self._update_recomps(recomps=self.recomps, candidate=candidate)
             self._update_candidates(candidate=candidate, recomp_cnt=recomp_cnt, candidates=self.candidates)
-            mem_consumption -= self.compute_memory(node_tensor=candidate)
+            mem_consumption -= self.get_memory(candidate=candidate)
             if (mem_consumption - mem_limit) <= 0 :
                 break
 
+    # def _get_recomp_src(self, candidate: any) -> None:
+    #     """
+    #     :param candidate: tuple
+    #     """
+    #     logging.info(f"Error in getting recomp_src for the candidate: {e}\n creating the recomp_src list")
+    #     rank = self.statistical_stats[candidate]['rank']
+    #     # get the total recomputetime from all subsequent nodes
+    #     count = rank
+    #     recomp_src = []
+    #     total_runtime = 0
+    #     while count >= 0:
+    #         x = self.rank_mapping[count]
+    #         recomp_src.append(x)
+    #         total_runtime += self.statistical_stats[x]['run_time']
+    #         count -= 1
+    #     self.candidates_dict[candidate]['recomp_time'] = total_runtime
 
-    def _get_recomp_src(self, candidate: tuple):
+    def _get_recomp_src(self, candidate: any) -> None:
         """
         :param candidate: tuple
         """
-        pass
+        recomp_src = []
+        cache_recent_subset = []
+        count = 0
+        while True:
+            num_args = 0
+            num_placeholders = 0
+            if count == 0:
+                # initial args are not counted in the recompute
+                cand_args = [*self.node_name_mapping[candidate].args]
+                # num_args += len(cand_args)
+                # index_check = num_args * -1
+                # append the nodes for recomp
+                for argument in cand_args:
+                    if argument.opcode == 'placeholder':
+                        continue
+                    else:
+                        # add the args of the arg to the list
+                        recomp_args = [*argument.args]
+                        num_args += len(recomp_args)
+                        for secondary_argument in recomp_args:
+                            # add to the list of recomps
+                            recomp_src.append(secondary_argument)
+                            # add to the cache subset
+                            cache_recent_subset.append(secondary_argument)
+                # add to the count
+                count += 1
+                # check if the number of args equals the number of placeholders
+                if num_args == num_placeholders:
+                    break
+            else:
+                # iterate over the cache subset to get its args
+                num_args += len(cache_recent_subset)
+                for cached_node in cache_recent_subset:
+                    # check if it is a placeholder node
+                    if cached_node.opcode == 'placeholder':
+                        num_placeholders += 1
+                        cache_recent_subset.remove(cached_node)
+                        continue
+                    else:
+                        # iterate over the args and add them
+                        cached_args = [*cached_node.args]
+                        for secondary_argument in cached_args:
+                            # add to the recomp_src
+                            recomp_src.append(secondary_argument)
+                            # add to the cache
+                            cache_recent_subset.append(secondary_argument)
+                        # remove the cached node from the cache
+                        cache_recent_subset.remove(cached_node)
+                # check if the args and num placeholders equal
+                if num_args == num_placeholders:
+                    break
+        return recomp_src
 
-    def _get_recomp_time(self, recomp_src: list):
+    def _get_recomp_time(self, candidate: any) -> float:
         """
         :param recomp_src: list
         """
-        recomp_time = 0
-        for n in recomp_src:
-            recomp_time += self.statistical_stats[n]['run_time']
 
-        return recomp_time
+        try:
+            return self.candidate_dict[candidate]['recomp_time']
+        except Exception:
+            try:
+                recomp_time = 0
+                for recomp_node in self.candidates_dict[candidate]['recomp_src']:
+                    recomp_time += self.statistical_stats[recomp_node.name]['run_time']
+                self.candidates_dict[candidate]['recomp_time'] = recomp_time
+                return recomp_time
+            except Exception as e:
+                logging.error(f"Error in getting recomp_time for the candidate: {e}")
+                raise ValueError(f"Error in getting recomp_time for the candidate: {e}")
 
-
-    def initialization(self, candidates: list) -> None:
+    def initialization(self) -> None:
         """
         :param candidates: list
             The list of intermediate nodes in the graphprofiler for either recompuation or swapping
         """
-        for candidate in candidates:
-            recomp_src = self._get_recomp_src(candidate=candidate)
-            recomp_time = self._get_recomp_time(recomp_src=self._get_recomp_src(candidate=candidate))
-            mem_consumption = self.compute_memory(node_tensor=candidate)
-            self.candidates_dict[candidate] = {'recomp_src': recomp_src,
-                                               'recomp_time': recomp_time,
-                                               'recomp_total_time': recomp_time,
-                                               'recompute_ratio': mem_consumption/recomp_time
-                                               }
+        for candidate in self.candidates:
+            self._get_recomp_src(candidate=candidate)
+            recomp_time = self._get_recomp_time(candidate=candidate)
+            mem_consumption = self.get_memory(candidate=candidate)
+            self.candidates_dict[candidate]['recompute_ratio'] = mem_consumption/recomp_time
 
-    def max_candidate(self, candidates: list):
+    def max_candidate(self):
         """
         :param candidates: list
         """
         max_candidate = None
-        for candidate in candidates:
+        for candidate in self.candidates:
             if max_candidate is None:
                 max_candidate = candidate
-            elif self.candidates_dict[candidate]['recompute_ratio'] < self.candidates_dict[max_candidate]['recompute_ratio']:
+            elif self.candidates_dict[max_candidate]['recompute_ratio'] < self.candidates_dict[candidate]['recompute_ratio']:
                 max_candidate = candidate
 
         return max_candidate
 
-
-    def update_recompute_ratio(self, candidates: list) -> None:
+    def update_recompute_ratio(self) -> None:
         """
         :param candidates: tuple
         """
-        for candidate in candidates:
-            candidate_memory = self.compute_memory(node_tensor=candidate)
+        for candidate in self.candidates:
+            candidate_memory = self.get_memory(candidate=candidate)
             self.candidates_dict[candidate]['recompute_ratio'] = candidate_memory/self.candidates_dict[candidate]['recomp_time']
 
-    def updating_existing_recomputations(self, recomps: list, candidate: tuple):
+    def updating_existing_recomputations(self, candidate: str):
         """
         :param recomps: list
             The list of intermediate nodes for recomputation
         :param candidate: tuple
         """
         recomp_cnt = 1
-        for rp in recomps:
+        for rp in self.recomps:
             if candidate in self.candidates_dict[rp]['recomp_src']:
                 recomp_cnt += 1
                 self.candidates_dict[rp]['recomp_src'].remove(candidate)
                 self.candidates_dict[rp]['recomp_src'].extend(self.candidates_dict[candidate]['recomp_src'])
-                self.candidates_dict[rp]['recomp_time'] += self._get_recomp_time(recomp_src=self.candidates_dict[candidate]['recomp_src'])
-
+                self.candidates_dict[rp]['recomp_time'] += self._get_recomp_time(candidate=candidate)
         return recomp_cnt
+
+    def replace_subsequent_uses_of(self,
+            graph: fx.Graph, old_node: fx.Node, new_node: fx.Node
+    ) -> None:
+        old_node_users = old_node.users
+        for node in reversed(graph.nodes):
+            if node == new_node:
+                break
+            if node in old_node_users:
+                node.replace_input_with(old_node, new_node)
+
+    def remove_detach_nodes(self, gm: fx.GraphModule) -> fx.GraphModule:
+        for node in gm.graph.nodes:
+            if node.target == torch.ops.aten.detach.default:
+                input_node = node.all_input_nodes[0]
+                node.replace_all_uses_with(input_node)
+                if len(node.users) == 0:
+                    gm.graph.erase_node(node)
+        gm.graph.lint()
+        gm.recompile()
+        return gm
+
+    def get_name_to_node_map(self) -> None:
+        name_to_node = {}
+        for node in self.graph_module.graph.nodes:
+            name_to_node[node.name] = node
+        return name_to_node
+
+    def activation_checkpointing(self) -> fx.GraphModule:
+        # iterate over the nodes that need recomputation
+        for node_name in self.recomps:
+            node = self.node_name_mapping[node_name]
+            first_back_access = self.node_pass_usage[node]['first_backward_use_node']
+            node_to_recompute = [node]
+            node_to_recompute_names = [node_name]
+            nodes_required_to_recompute = self.candidates_dict[node_name]['recomp_src']
+
+            recompute_subgraph = _extract_graph_with_inputs_outputs(
+                joint_graph=self.graph_module.graph,
+                inputs=nodes_required_to_recompute,
+                outputs=node_to_recompute,
+            )
+            print("Extracted recomputation sub-graph: ")
+            recompute_subgraph.print_tabular()
+
+            # Insert the nodes of the new sub-graph in the old graph before the first
+            # backward access of the node to be recomputed.
+            with self.graph_module.graph.inserting_before(first_back_access):
+                for n in recompute_subgraph.nodes:
+                    if n.op == "placeholder" or n.op == "output":
+                        continue
+                    # Copy the nodes of the new sub-graph to old graph and transform its
+                    # inputs to match the old-graph inputs. The arg_transform function
+                    # will pass the input arguments of the new node and will expect a
+                    # mapping to the nodes of the old graph.
+                    new_node = self.graph_module.graph.node_copy(
+                        n, arg_transform=lambda arg: self.node_name_mapping[arg.name]
+                    )
+
+                    if n.name in node_to_recompute_names:
+                        old_node = self.node_name_mapping[n.name]
+                        # Replace all the uses of the old node with new recomputation node
+                        self.replace_subsequent_uses_of(
+                            self.graph_module.graph, old_node=old_node, new_node=new_node
+                        )
+                    # Add the new node to our name to node mapping
+                    self.node_name_mapping[n.name] = new_node
+
+        self.graph_module.graph.lint()
+        self.graph_module.recompile()
+        return self.graph_module

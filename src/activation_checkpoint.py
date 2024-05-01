@@ -75,10 +75,15 @@ def activation_checkpointing(gm: fx.GraphModule) -> fx.GraphModule:
     # intermediate nodes that are checkpointed.
 
     name_to_node = get_name_to_node_map(gm)
+    print(f"name_to_node = {name_to_node}")
     first_back_access = name_to_node["t"]
+    print(f"first_back_access = {first_back_access}")
     node_to_recompute = [name_to_node["relu"]]
+    print(f"node_to_recompute = {node_to_recompute}")
     node_to_recompute_names = ["relu"]
+    print(f"node_to_recompute_names: {node_to_recompute_names}")
     nodes_required_to_recompute = [name_to_node["w1_1"], name_to_node["x_1"]]
+    print(f"nodes_required_to_recompute: {node_to_recompute}")
 
     # NOTE: we cannot directly use 'mm' to recompute 'relu' since 'mm' is not an
     # intermediate node that is retained (checkpointed).
@@ -121,10 +126,11 @@ def activation_checkpointing(gm: fx.GraphModule) -> fx.GraphModule:
 
 
 if __name__ == "__main__":
+    mps_device = torch.device("mps")
     # Create two weight matrices that require gradients and one input data matrix
-    w1 = torch.randn(1024, 1024, device="cuda", requires_grad=True)
-    w2 = torch.randn(2048, 512, device="cuda", requires_grad=True)
-    x = torch.randn(1024, 2048, device="cuda")
+    w1 = torch.randn(1024, 1024, device=mps_device, requires_grad=True)
+    w2 = torch.randn(2048, 512, device=mps_device, requires_grad=True)
+    x = torch.randn(1024, 2048, device=mps_device)
 
     # Create a graph module by tracing the the custom function with the given inputs
     graph_module = make_fx(custom_fn)(w1, w2, x)
